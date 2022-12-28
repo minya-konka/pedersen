@@ -7,61 +7,60 @@ import (
 	"math/big"
 )
 
-const GenpointPrefix = "PedersenGenerator"
+const (
+	windowSize         = 4
+	nWindowsPerSegment = 50
+	GenpointPrefix     = "PedersenGenerator"
+)
 
 func Hash(message []byte) *babyjub.Point {
+	bitsPerSegment := windowSize * nWindowsPerSegment
 
-	msg := bits(message)
-	size := len(msg) / 200
+	bitLen := 8 * len(message) //bits(message)
+	nSegments := (bitLen + bitsPerSegment - 1) / bitsPerSegment
 
-	if len(msg)%200 > 0 {
-		size += 1
-	}
+	accP := babyjub.NewPoint()
 
-	H := babyjub.NewPoint()
-	M := make([]*big.Int, size)
-
-	for i := range M {
-		M[i] = big.NewInt(0)
-		ki := 200
-		if i == len(M)-1 {
-			ki = len(msg) % 200
+	for s := 0; s < nSegments; s++ {
+		nWindows := 0
+		if s == nSegments-1 {
+			nWindows = (bitLen - (nSegments-1)*bitsPerSegment + windowSize - 1) / windowSize
+		} else {
+			nWindows = nWindowsPerSegment
 		}
-		var c uint = 0
-		for j := 0; j < ki; j += 4 {
-			encM := enc(msg[j], msg[j+1], msg[j+2], msg[j+3])
-			if msg[j+3] == 1 {
-				encM = encM.Neg(encM)
+		escalar := big.NewInt(0)
+		exp := big.NewInt(1)
+
+		for w := 0; w < nWindows; w++ {
+			o := s*bitsPerSegment + w*windowSize
+			acc := big.NewInt(1)
+			for b := 0; b < windowSize-1 && o < bitLen; b++ {
+				if bits(message, o) == 1 {
+					acc = new(big.Int).Add(acc, new(big.Int).Lsh(big.NewInt(1), uint(b)))
+				}
+				o++
 			}
-			exp := big.NewInt(1)
-			exp = exp.Lsh(exp, 5*c)
-			M[i] = M[i].Add(M[i], encM.Mul(encM, exp))
-			c += 1
+			if o < bitLen {
+				if bits(message, o) == 1 {
+					acc = new(big.Int).Neg(acc)
+				}
+				o++
+			}
+			escalar = new(big.Int).Add(escalar, new(big.Int).Mul(acc, exp))
+			exp = new(big.Int).Lsh(exp, windowSize+1)
+		}
+		if escalar.Sign() < 0 {
+			escalar = new(big.Int).Add(escalar, babyjub.SubOrder)
 		}
 
-		if M[i].Sign() < 0 {
-			M[i] = M[i].Add(M[i], babyjub.SubOrder)
-		}
-
-		basePoint := generateBasePoint(i)
-		H = eccAdd(H, basePoint.Mul(M[i], basePoint))
+		basePoint := generateBasePoint(s)
+		accP = eccAdd(accP, basePoint.Mul(escalar, basePoint))
 	}
-	return H
+	return accP
 }
 
-func enc(b0, b1, b2, b3 int64) *big.Int {
-	ret := big.NewInt((2*b3 - 1) * (1 + b0 + 2*b1 + 4*b2))
-	return ret.Abs(ret)
-}
-
-func bits(bs []byte) []int64 {
-	r := make([]int64, len(bs)*8)
-	for i, b := range bs {
-		for j := 0; j < 8; j++ {
-			r[i*8+j] = int64(b >> uint(j) & 0x01)
-		}
-	}
-	return r
+func bits(bs []byte, pos int) byte {
+	return (bs[pos/8] >> (pos % 8)) & 1
 }
 
 func eccAdd(p1, p2 *babyjub.Point) *babyjub.Point {
